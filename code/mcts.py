@@ -14,6 +14,10 @@
 # remains in any distributed code.
 #
 # For more information about Monte Carlo Tree Search check out our web site at www.mcts.ai
+#
+# Modifications to the original code by Peter Cowlin, Ed Powley and Daniel Whitehouse have been made
+# by Angel Seiji Morimoto Burgos, so that data from the actions taken by MCTS at given states could
+# be easily collected for several games and different number of iterations in the UCT function.
 
 from math import *
 import random
