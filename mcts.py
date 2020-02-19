@@ -424,11 +424,10 @@ def UCTPlayGames(games=1, itermax_player1=100, itermax_player2=100):
     """ Play a sample game between two UCT players 'n' number of times. Each player gets a 
         certain number of UCT iterations (= simulations = tree nodes).
     """
+    datasets = [[], []]
+    times = [[], []]
     for game in range(games):
         state = OthelloState()
-        datasets = [[], []]
-        times = [[], []]
-
         while (state.GetMoves() != []):
             current_player = 3 - state.playerJustMoved
             if current_player == 1:
@@ -439,9 +438,13 @@ def UCTPlayGames(games=1, itermax_player1=100, itermax_player2=100):
                 start_time = time.time()
                 m = UCT(rootstate=state, itermax=itermax_player2, verbose=False)
                 end_time = time.time()
-            board_tuple = tuple(tuple(row) for row in state.board)
+            board_flat = []
+            for row in state.board:
+                board_flat.extend(row)
+            row_pos, col_pos = m
+            action_label = str(row_pos) + str(col_pos)
             datasets[current_player -
-                     1].append((board_tuple, current_player, m))
+                     1].append((board_flat, current_player, action_label))
             times[current_player - 1].append(end_time - start_time)
             print("Best Move: " + str(m) + "\n")
             state.DoMove(m)
@@ -459,8 +462,8 @@ def UCTPlayGamesSeveralIterations():
     """ Play 'n' times a game using two UCT players for several different values of iterations
         to utilize in the UCT algorithm.
     """
-    iterations_list = [100, 500, 1000, 1500, 2000]
-    games_per_iteration = 50
+    iterations_list = [200, 350, 500]
+    games_per_iteration = 10
     datasets_root_path = "data/games_data/"
     times_root_path = "data/times_data/"
     for iterations in iterations_list:
@@ -475,12 +478,9 @@ def UCTPlayGamesSeveralIterations():
 
 def WriteDatasetToCSVFile(dataset, csv_file, output_mode='a'):
     with open(csv_file, output_mode) as file:
-        for (board, player, action) in dataset:
-            board_flat = []
-            for row in board:
-                board_flat.extend(row)
+        for (board_flat, player, action_label) in dataset:
             line = ','.join(str(val) for val in board_flat) + ',' + str(player) + \
-                ',' + ','.join(str(val) for val in action) + '\n'
+                ',' + f'\"{action_label}\"' + '\n'
             file.write(line)
 
 
