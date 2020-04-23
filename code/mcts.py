@@ -16,18 +16,25 @@
 # For more information about Monte Carlo Tree Search check out our web site at www.mcts.ai
 #
 # Modifications to the original code by Peter Cowlin, Ed Powley and Daniel Whitehouse have been made
-# by Angel Seiji Morimoto Burgos, so that data from the actions taken by MCTS at given states could
-# be easily collected for several games and different number of iterations in the UCT function.
+# by Angel Seiji Morimoto Burgos.
 
-from math import *
+import argparse
+import itertools
+import multiprocessing as mp
+import os
 import random
+import sklearn
 import time
+from joblib import dump, load
+from math import *
+from sklearn.model_selection import GridSearchCV
+from sklearn.tree import DecisionTreeClassifier
 
 
 class GameState:
     """ A state of the game, i.e. the game board. These are the only functions which are
-        absolutely necessary to implement UCT in any 2-player complete information deterministic 
-        zero-sum game, although they can be enhanced and made quicker, for example by using a 
+        absolutely necessary to implement UCT in any 2-player complete information deterministic
+        zero-sum game, although they can be enhanced and made quicker, for example by using a
         GetRandomMove() function to generate a random move during rollout.
         By convention the players are numbered 1 and 2.
     """
@@ -54,7 +61,7 @@ class GameState:
         """
 
     def GetResult(self, playerjm):
-        """ Get the game result from the viewpoint of playerjm. 
+        """ Get the game result from the viewpoint of playerjm.
         """
 
     def __repr__(self):
@@ -63,122 +70,15 @@ class GameState:
         pass
 
 
-class NimState:
-    """ A state of the game Nim. In Nim, players alternately take 1,2 or 3 chips with the 
-        winner being the player to take the last chip. 
-        In Nim any initial state of the form 4n+k for k = 1,2,3 is a win for player 1
-        (by choosing k) chips.
-        Any initial state of the form 4n is a win for player 2.
-    """
-
-    def __init__(self, ch):
-        # At the root pretend the player just moved is p2 - p1 has the first move
-        self.playerJustMoved = 2
-        self.chips = ch
-
-    def Clone(self):
-        """ Create a deep clone of this game state.
-        """
-        st = NimState(self.chips)
-        st.playerJustMoved = self.playerJustMoved
-        return st
-
-    def DoMove(self, move):
-        """ Update a state by carrying out the given move.
-            Must update playerJustMoved.
-        """
-        assert move >= 1 and move <= 3 and move == int(move)
-        self.chips -= move
-        self.playerJustMoved = 3 - self.playerJustMoved
-
-    def GetMoves(self):
-        """ Get all possible moves from this state.
-        """
-        return list(range(1, min([4, self.chips + 1])))
-
-    def GetResult(self, playerjm):
-        """ Get the game result from the viewpoint of playerjm. 
-        """
-        assert self.chips == 0
-        if self.playerJustMoved == playerjm:
-            return 1.0  # playerjm took the last chip and has won
-        else:
-            return 0.0  # playerjm's opponent took the last chip and has won
-
-    def __repr__(self):
-        s = "Chips:" + str(self.chips) + " JustPlayed:" + \
-            str(self.playerJustMoved)
-        return s
-
-
-class OXOState:
-    """ A state of the game, i.e. the game board.
-        Squares in the board are in this arrangement
-        012
-        345
-        678
-        where 0 = empty, 1 = player 1 (X), 2 = player 2 (O)
-    """
-
-    def __init__(self):
-        # At the root pretend the player just moved is p2 - p1 has the first move
-        self.playerJustMoved = 2
-        # 0 = empty, 1 = player 1, 2 = player 2
-        self.board = [0, 0, 0, 0, 0, 0, 0, 0, 0]
-
-    def Clone(self):
-        """ Create a deep clone of this game state.
-        """
-        st = OXOState()
-        st.playerJustMoved = self.playerJustMoved
-        st.board = self.board[:]
-        return st
-
-    def DoMove(self, move):
-        """ Update a state by carrying out the given move.
-            Must update playerToMove.
-        """
-        assert move >= 0 and move <= 8 and move == int(
-            move) and self.board[move] == 0
-        self.playerJustMoved = 3 - self.playerJustMoved
-        self.board[move] = self.playerJustMoved
-
-    def GetMoves(self):
-        """ Get all possible moves from this state.
-        """
-        return [i for i in range(9) if self.board[i] == 0]
-
-    def GetResult(self, playerjm):
-        """ Get the game result from the viewpoint of playerjm. 
-        """
-        for (x, y, z) in [(0, 1, 2), (3, 4, 5), (6, 7, 8), (0, 3, 6), (1, 4, 7), (2, 5, 8), (0, 4, 8), (2, 4, 6)]:
-            if self.board[x] == self.board[y] == self.board[z]:
-                if self.board[x] == playerjm:
-                    return 1.0
-                else:
-                    return 0.0
-        if self.GetMoves() == []:
-            return 0.5  # draw
-        assert False  # Should not be possible to get here
-
-    def __repr__(self):
-        s = ""
-        for i in range(9):
-            s += ".XO"[self.board[i]]
-            if i % 3 == 2:
-                s += "\n"
-        return s
-
-
 class OthelloState:
     """ A state of the game of Othello, i.e. the game board.
         The board is a 2D array where 0 = empty (.), 1 = player 1 (X), 2 = player 2 (O).
         In Othello players alternately place pieces on a square board - each piece played
-        has to sandwich opponent pieces between the piece played and pieces already on the 
+        has to sandwich opponent pieces between the piece played and pieces already on the
         board. Sandwiched pieces are flipped.
         This implementation modifies the rules to allow variable sized square boards and
         terminates the game as soon as the player about to move cannot make a move (whereas
-        the standard game allows for a pass move). 
+        the standard game allows for a pass move).
     """
 
     def __init__(self, sz=8):
@@ -273,7 +173,7 @@ class OthelloState:
         return x >= 0 and x < self.size and y >= 0 and y < self.size
 
     def GetResult(self, playerjm):
-        """ Get the game result from the viewpoint of playerjm. 
+        """ Get the game result from the viewpoint of playerjm.
         """
         jmcount = len([(x, y) for x in range(self.size)
                        for y in range(self.size) if self.board[x][y] == playerjm])
@@ -356,10 +256,11 @@ class Node:
         return s
 
 
-def UCT(rootstate, itermax, verbose=False):
+def UCT(rootstate, itermax, model=None, verbose=0):
     """ Conduct a UCT search for itermax iterations starting from rootstate.
         Return the best move from the rootstate.
-        Assumes 2 alternating players (player 1 starts), with game results in the range [0.0, 1.0]."""
+        Assumes 2 alternating players (player 1 starts), with game results in the range [0.0, 1.0].
+    """
 
     rootnode = Node(state=rootstate)
 
@@ -380,8 +281,15 @@ def UCT(rootstate, itermax, verbose=False):
             node = node.AddChild(m, state)  # add child and descend tree
 
         # Rollout - this can often be made orders of magnitude quicker using a state.GetRandomMove() function
-        while state.GetMoves() != []:  # while state is non-terminal
-            state.DoMove(random.choice(state.GetMoves()))
+        if model is None:
+            while state.GetMoves() != []:
+                state.DoMove(random.choice(state.GetMoves()))
+        else:
+            while state.GetMoves() != []:  # While state is non-terminal.
+                if random.random() <= 0.10:
+                    state.DoMove(random.choice(state.GetMoves()))
+                else:
+                    state.DoMove(PredictActionWithModel(state, model))
 
         # Backpropagate
         while node != None:  # backpropagate from the expanded node and work back to the root node
@@ -390,97 +298,375 @@ def UCT(rootstate, itermax, verbose=False):
             node = node.parentNode
 
     # Output some information about the tree - can be omitted
-    if (verbose):
+    if (verbose == 2):
         print(rootnode.TreeToString(0))
-    else:
+    elif (verbose == 1):
         print(rootnode.ChildrenToString())
 
     # return the move that was most visited
     return sorted(rootnode.childNodes, key=lambda c: c.visits)[-1].move
 
 
-def UCTPlayGame():
-    """ Play a sample game between two UCT players where each player gets a different number 
-        of UCT iterations (= simulations = tree nodes).
-    """
-    state = OthelloState(
-        4)  # uncomment to play Othello on a square board of the given size
-    # state = OXOState() # uncomment to play OXO
-    # state = NimState(15) # uncomment to play Nim with the given number of starting chips
-    while (state.GetMoves() != []):
-        print(str(state))
-        if state.playerJustMoved == 1:
-            # play with values for itermax and verbose = True
-            m = UCT(rootstate=state, itermax=1000, verbose=False)
-        else:
-            m = UCT(rootstate=state, itermax=100, verbose=False)
-        print("Best Move: " + str(m) + "\n")
-        state.DoMove(m)
-    if state.GetResult(state.playerJustMoved) == 1.0:
-        print("Player " + str(state.playerJustMoved) + " wins!")
-    elif state.GetResult(state.playerJustMoved) == 0.0:
-        print("Player " + str(3 - state.playerJustMoved) + " wins!")
+def PredictActionWithModel(state, model):
+    '''
+    Predicts an action given an Othello game state using a machine learning model.
+
+    :param state: Othello game state from which the action will be predicted.
+
+    :param model: the learning model used for predicting the action.
+
+    :returns: the action predicted in the form of a two-element tuple, where the first element
+    specifies the row position of the board and the second the column position.
+    '''
+    # Format the state so that it is a valid input to the model.
+    board_flat = []
+    for row in state.board:
+        board_flat.extend(row)
+    current_player = 3 - state.playerJustMoved
+    X = [board_flat + [current_player]]
+
+    # Predict the action using the model.
+    action = model.predict(X)[0]
+    row_pos = int(action[0])
+    col_pos = int(action[1])
+
+    # Return the action predicted by the model if it is a legal action. Otherwise, pick a random
+    # legal action.
+    if state.IsOnBoard(row_pos, col_pos) and state.board[row_pos][col_pos] == 0:
+        return (row_pos, col_pos)
     else:
-        print("Nobody wins!")
+        return random.choice(state.GetMoves())
 
 
-def UCTPlayGames(games=1, itermax_player1=100, itermax_player2=100):
-    """ Play a sample game between two UCT players 'n' number of times. Each player gets a 
-        certain number of UCT iterations (= simulations = tree nodes).
-    """
+def UCTPlayGame(gameId, itermax_player1, itermax_player2, model_player1=None, model_player2=None, name_player1=None, name_player2=None):
+    '''
+    Plays an Othello game between two UCT players, where each player gets its own number of UCT
+    iterations (= simulations = tree nodes), its own learning model to use as the playout/simulation
+    policy and its own name.
+
+    :param gameId: integer representing the number of game being played between player 1 and 2.
+
+    :param itermax_player1: number of maximum iterations to run in UCT when using player 1.
+
+    :param itermax_player2: number of maximum iterations to run in UCT when using player 2.
+
+    :param model_player1: learning model to use as the playout policy of player 1. If None, the
+    uniform random distribution will be used as the playout policy.
+
+    :param model_player2: learning model to use as the playout policy of player 2. If None, the
+    uniform random distribution will be used as the playout policy.
+
+    :param name_player1: the name of the player 1. Used for displaying info to the console.
+    Necessary if the winner should be returned from this function.
+
+    :param name_player2: the name of the player 2. Used for displaying info to the console.
+    Necessary if the winner should be returned from this function.
+
+    :returns: a tuple of three elements. The first one is a list with two elements, each one being
+    a list of the states and actions taken by each player. The second one is a list with two
+    elements, each one being a list of the times required for each player to take an action. The
+    third one is the name of the player who won or None (if draw or if name_player1 and
+    name_player2 are not known).
+    '''
+    # Initialize variables.
     datasets = [[], []]
     times = [[], []]
-    for game in range(games):
-        state = OthelloState()
-        while (state.GetMoves() != []):
-            current_player = 3 - state.playerJustMoved
-            if current_player == 1:
-                start_time = time.time()
-                m = UCT(rootstate=state, itermax=itermax_player1, verbose=False)
-                end_time = time.time()
-            else:
-                start_time = time.time()
-                m = UCT(rootstate=state, itermax=itermax_player2, verbose=False)
-                end_time = time.time()
-            board_flat = []
-            for row in state.board:
-                board_flat.extend(row)
-            row_pos, col_pos = m
-            action_label = str(row_pos) + str(col_pos)
-            datasets[current_player -
-                     1].append((board_flat, current_player, action_label))
-            times[current_player - 1].append(end_time - start_time)
-            print("Best Move: " + str(m) + "\n")
-            state.DoMove(m)
-        if state.GetResult(state.playerJustMoved) == 1.0:
-            print(f"Player {str(state.playerJustMoved)} wins game {game}!")
-        elif state.GetResult(state.playerJustMoved) == 0.0:
-            print(
-                f"Player {str(3 - state.playerJustMoved)} wins game {game}!")
+    state = OthelloState()
+
+    # Print information about the match if the name of the players is known.
+    if name_player1 and name_player2:
+        print(f'Starting game {gameId} between {name_player1} and {name_player2}')
+    
+    # Make the current player perform a move while the game is not over (there are still moves left)
+    while (state.GetMoves() != []):
+        # Use UCT with the correct parameters according to the current player. 
+        current_player = 3 - state.playerJustMoved
+        if current_player == 1:
+            start_time = time.time()
+            m = UCT(rootstate=state, itermax=itermax_player1,
+                    model=model_player1)
+            end_time = time.time()
         else:
-            print(f"Nobody wins game {game}!")
+            start_time = time.time()
+            m = UCT(rootstate=state, itermax=itermax_player2,
+                    model=model_player2)
+            end_time = time.time()
+        
+        # Flatten the board, obtain the x and y coordinates of the action taken and put that info
+        # (along with the current player) as part of the data collected. Also, register how much
+        # time was needed to perform the UCT function.
+        board_flat = []
+        for row in state.board:
+            board_flat.extend(row)
+        row_pos, col_pos = m
+        action_label = str(row_pos) + str(col_pos)
+        datasets[current_player -
+                 1].append((board_flat, current_player, action_label))
+        times[current_player - 1].append(end_time - start_time)
+
+        # Perform the move selected by the UCT function.
+        state.DoMove(m)
+    
+    # If the names of the players are known, find who is the winner and print in the console the
+    # result of the match (who won/lost or if it was a draw).
+    if name_player1 and name_player2:
+        if state.GetResult(state.playerJustMoved) == 1.0:
+            if state.playerJustMoved == 1:
+                winner = name_player1
+                loser = name_player2
+            else:
+                winner = name_player2
+                loser = name_player1
+            print(f'Player {winner} wins game {gameId} against {loser}!')
+        elif state.GetResult(state.playerJustMoved) == 0.0:
+            if state.playerJustMoved == 1:
+                winner = name_player2
+                loser = name_player1
+            else:
+                winner = name_player1
+                loser = name_player2
+            print(f'Player {winner} wins game {gameId} against {loser}!')
+        else:
+            winner = None
+            print(
+                f'Draw in game {gameId} between {name_player1} and {name_player2}!')
+        return (datasets, times, winner)
+    return (datasets, times, None)
+
+
+def UCTPlayGames(games=1, itermax_player1=100, itermax_player2=100, model_player1=None, model_player2=None, name_player1=None, name_player2=None):
+    '''
+    Plays a series of Othello games between two players where each player gets its own number of UCT
+    iterations (= simulations = tree nodes), its own learning model to use as the playout/simulation
+    policy and its own name.
+
+    See UCTPlayGame() for a description of most of the parameters.
+
+    :param games: number of games to play between the two players. If not a multiple of the number
+    of a CPU cores in the system, it will be modified to equal the next multiple of CPU cores.
+
+    :returns: a list with size equal to the number of games played. Each position within the list
+    is the three-element tuple returned by a UCTPlayGame() call.
+    '''
+    # Initialize variables.
+    results = []
+
+    # Set the number of games to a multiple of the number of CPU cores in the system.
+    if games % mp.cpu_count() != 0:
+        games = games + (mp.cpu_count() - (games % mp.cpu_count()))
+
+    # Iterate until all games have been played. In each iteration 'n' games will be played in
+    # parallel, where 'n' is the number of CPU cores in the system.
+    for i in range(int(games / mp.cpu_count())):
+        t = time.time()
+        with mp.Pool(processes=mp.cpu_count()) as pool:
+            gamesId = [id for id in range(
+                i * mp.cpu_count(), (i + 1) * mp.cpu_count())]
+            args = [(id, itermax_player1, itermax_player2, model_player1, model_player2,
+                     name_player1, name_player2) for id in gamesId]
+            results += pool.starmap(UCTPlayGame, args)
+    
+    # Return the results given by each call to UCTPlayGame.
+    return results
+
+
+def UCTPlayGamesAndCollectData(games=1, itermax_player1=100, itermax_player2=100, model_player1=None, model_player2=None, name_player1=None, name_player2=None):
+    '''
+    Plays a series of Othello games between two players where each player gets its own number of UCT
+    iterations (= simulations = tree nodes), its own learning model to use as the playout/simulation
+    policy and its own name. It collects data from these games and returns it.
+
+    See UCTPlayGames() for a description of the parameters, which are the same.
+
+    :returns: a tuple of two elements. The first one is a list with two elements, each one being
+    a list of the states and actions taken by each player during the games. The second one is a
+    list with two elements, each one being a list of the times required for each player to take an
+    action during the games.
+    '''
+    # Initialize variables.
+    datasets = [[], []]
+    times = [[], []]
+
+    # Log data to the console if the players' names are known.
+    if name_player1 and name_player2:
+        print(f'Starting games between {name_player1} and {name_player2} for collecting data...')
+        start_time = time.time()
+    
+    # Play the games.
+    results = UCTPlayGames(games, itermax_player1, itermax_player2,
+                           model_player1, model_player2, name_player1, name_player2)
+
+    # Log data to the console if the players' names are known.
+    if name_player1 and name_player2:
+        duration = time.time() - start_time
+        print(f'Finished games in {duration} seconds.')
+
+    # Merge all the data and times collected of the games played into only two collections.
+    for (dataset, timeset, _) in results:
+        datasets[0].extend(dataset[0])
+        datasets[1].extend(dataset[1])
+        times[0].extend(timeset[0])
+        times[1].extend(timeset[1])
+
+    # Return the collections of data and times of the games played.
     return (datasets, times)
 
 
-def UCTPlayGamesSeveralIterations():
-    """ Play 'n' times a game using two UCT players for several different values of iterations
-        to utilize in the UCT algorithm.
-    """
-    iterations_list = [200, 350, 500]
-    games_per_iteration = 10
+def UCTPlayTournament(games, model_name, competitors, models_dir, out_file):
+    '''
+    Makes an agent play a set of games against some competitors.
+
+    :param games: number of games the agent will play against each competitor.
+
+    :param model_name: name of the agent that will play against other.
+
+    :param competitors: list of strings. Each element corresponds to the name of an agent that will
+    compete against 'model_name'.
+
+    :param models_dir: string representing the path to the directory containing all the decision
+    tree models.
+
+    :param out_file: string representing the path to the file where the results of the games will
+    be printed to.
+    '''
+    # Breaks up the name of the model to find out the details of it. For a model with name DT_i_j,
+    # 'i' specifies the number of iterations to use in MCTS and 'j' represents which decision tree
+    # it represents (e.g. j = 2 represent that model is the second decision tree generated). If 'j'
+    # is 0, then no decision model should be loaded.
+    model_name_split = model_name.split('_')
+    itermax_player1 = int(model_name_split[1])
+    if int(model_name_split[2]) == 0:
+        model = None
+    else:
+        # Loads the model from disk.
+        model_type = '_'.join(model_name_split[:-1])
+        model = load(f'{models_dir}{model_type}/{model_name}.joblib')
+
+    # Iterate over the list of competitors.
+    for competitor in competitors:
+        # Breaks up the name of the competitor model to find out details of it. See above comment.
+        competitor_name_split = competitor.split('_')
+        itermax_player2 = int(competitor_name_split[1])
+        if int(competitor_name_split[2]) == 0:
+            model_competitor = None
+        else:
+            # Loads the model corresponding to the competitor from disk.
+            model_competitor_type = '_'.join(competitor_name_split[:-1])
+            model_competitor = load(f'{models_dir}{model_competitor_type}/{competitor}.joblib')
+        
+        # Play half of the games with 'model' as player 1 and the other half with it as player 2.
+        print(f'Playing games between {model_name} and {competitor}.')
+        results = UCTPlayGames(int(games / 2), itermax_player1, itermax_player2,
+                               model, model_competitor, model_name, competitor)
+        results += UCTPlayGames(int(games / 2), itermax_player2, itermax_player1,
+                                model_competitor, model, competitor, model_name)
+
+        # Count the number of times 'model' won/lost/draw against 'model_competitor'.
+        game_count = len(results)
+        win_count = 0
+        draw_count = 0
+        for (_, _, winner) in results:
+            if winner == model_name:
+                win_count = win_count + 1
+            elif winner is None:
+                draw_count = draw_count + 1
+        loss_count = game_count - win_count - draw_count
+
+        # Write the results to the output file.
+        with open(out_file, 'a') as file:
+            file.write(f'{model_name} vs {competitor},{game_count},{win_count},{draw_count},{loss_count}\n')
+
+
+def UCTTrainModels(n, games_per_model, iterations):
+    '''
+    Generates decision tree models from data collected in UCT procedures using a random playout
+    policy and previous decision tree models.
+
+    :param n: number of decision tree models to generate.
+
+    :param games_per_model: number of games from which to collect data before generating a decision
+    tree model.
+
+    :param iterations: number of iterations to run the MCTS procedure with.
+    '''
+    # Initialize variables.
+    model = None
+    min_samples_leaf = None
+    min_samples_split = None
+    X = []
+    y = []
+
+    # Constants representing the paths to the directories that will hold the trained models, the
+    # datasets collected and the information gathered about execution time taken to make MCTS/UCT
+    # decisions.
+    models_root_path = "models/"
     datasets_root_path = "data/games_data/"
     times_root_path = "data/times_data/"
-    for iterations in iterations_list:
-        (datasets, times) = UCTPlayGames(
-            games_per_iteration, iterations, iterations)
+
+    # Paths to the specific directories for the type of models that will be created in this run of
+    # the function call.
+    paths = [f'{models_root_path}DT_{iterations}',
+             f'{datasets_root_path}DT_{iterations}',
+             f'{times_root_path}DT_{iterations}']
+
+    # Create the directories if they don't exist yet.
+    for path in paths:
+        if not os.path.exists(path):
+            os.mkdir(path)
+
+    # Iteration for generating 'n' decision tree models.
+    for i in range(n):
+        # Collect data by running 'games_per_model' games employing the last created model as the
+        # playout policy in MCTS/UCT. If no model has been created yet, use a random playout policy.
+        print(f'Collecting data for model DT_{iterations}_{i + 1}...')
+        model_name = f'DT_{iterations}_{i}'
+        (datasets, times) = UCTPlayGamesAndCollectData(games_per_model, iterations, iterations,
+            model, model, f'{model_name}-1', f'{model_name}-2')
+
+        # Save the data collected for training a model (and metadata) to disk.
+        print(f'Saving data collected for model DT_{iterations}_{i + 1}...')
         for dataset in datasets:
-            WriteDatasetToCSVFile(
-                dataset, f"{datasets_root_path}MCTS{iterations}.csv")
+            WriteDatasetToCSVFile(dataset, f'{paths[1]}/{model_name}.csv')
         for timeset in times:
-            WriteTimesToFile(timeset, f"{times_root_path}MCTS{iterations}.txt")
+            WriteTimesToFile(timeset, f'{paths[2]}/{model_name}.csv')
+
+        # Put the corresponding parts of the dataset collected in this iteration with the inputs and
+        # outputs collected in previous iterations of this for-loop.
+        data = datasets[0] + datasets[1]
+        X.extend([record[0] + [record[1]] for record in data])
+        y.extend([record[2] for record in data])
+
+        # If the hyper-params of the DT models have not been set, do a grid search to find the ones
+        # that have the best performance.
+        if min_samples_leaf is None or min_samples_split is None:
+            print(f'Selecting hyper-parameters for model...')
+            params = SelectModelHyperParams(
+                X, y, f'{paths[0]}/grid_search_results.txt')
+            min_samples_leaf = params['min_samples_leaf']
+            min_samples_split = params['min_samples_split']
+
+        # Train a decision tree model by using all the data collected thus far (from all iterations
+        # in this for-loop).
+        print(f'Training model DT_{iterations}_{i + 1}...')
+        model = DecisionTreeClassifier(
+            min_samples_leaf=min_samples_leaf, min_samples_split=min_samples_split, random_state=0)
+        model.fit(X, y)
+
+        # Save the trained model to disk.
+        print(f'Saving model DT_{iterations}_{i + 1} to disk...')
+        dump(model, f'{paths[0]}/DT_{iterations}_{i + 1}.joblib')
 
 
 def WriteDatasetToCSVFile(dataset, csv_file, output_mode='a'):
+    '''
+    Writes a dataset of states and actions to disk.
+
+    :param dataset: the dataset to save to disk.
+
+    :param csv_file: the path to the file where the dataset will be saved to.
+
+    :param output_mode: mode in which the 'csv_file' will be opened.
+    '''
     with open(csv_file, output_mode) as file:
         for (board_flat, player, action_label) in dataset:
             line = ','.join(str(val) for val in board_flat) + ',' + str(player) + \
@@ -489,12 +675,93 @@ def WriteDatasetToCSVFile(dataset, csv_file, output_mode='a'):
 
 
 def WriteTimesToFile(times, file_name, output_mode='a'):
+    '''
+    Writes a dataset of times to disk.
+
+    :param times: the dataset to save to disk.
+
+    :param file_name: the path to the file where the dataset will be saved to.
+
+    :param output_mode: mode in which the 'file_name' will be opened.
+    '''
     with open(file_name, output_mode) as file:
         for time in times:
             file.write(str(time) + '\n')
 
 
+def SelectModelHyperParams(X, y, file_name):
+    '''
+    Performs a grid search to select the best hyper-parameters for a decision tree model.
+
+    :param X: the input data that will be used for the grid search.
+
+    :param y: the output data that will be used for the grid search.
+
+    :param file_name: the path to the file where the best params and scores will be saved to.
+
+    :returns: a dictionary where the keys are the names of the hyper-parameters optimized and the
+    values are the best values found for those hyper-parameters in the grid search.
+    '''
+    # Grid of parameters over which to perform the grid search.
+    param_grid = [
+        {'min_samples_split': range(2, 41),
+         'min_samples_leaf': range(1, 20)}
+    ]
+
+    # Perform the grid search.
+    search = GridSearchCV(DecisionTreeClassifier(random_state=0), param_grid)
+    start = time.time()
+    search.fit(X, y)
+    duration = time.time() - start
+
+    # Output to the file the best params, the best score achieved and the time taken to perform the
+    # grid search.
+    with open(file_name, 'w') as file:
+        for param, value in search.best_params_.items():
+            file.write(f'{param},{value}\n')
+        file.write(f'accuracy,{search.best_score_}\n')
+        file.write(f'time,{duration}\n')
+
+    # return the best params found by the grid search.
+    return search.best_params_
+
+
 if __name__ == "__main__":
-    """ Play a game to the end (multiple times) using UCT for both players. 
-    """
-    UCTPlayGamesSeveralIterations()
+    '''
+    Train decision tree models from UCT games and/or play a series of games between agents.
+    '''
+    
+    # Specification and parsing of command-line arguments.
+    parser = argparse.ArgumentParser(description='Train or Play Games')
+    parser.add_argument('iter', nargs='*', type=int)
+    parser.add_argument('-t', '--games_train', dest='games_per_model', type=int)
+    parser.add_argument('-p', '--games_play', dest='games_play', type=int)
+    parser.add_argument('-n', '--n_models', dest='n_models', type=int)
+    parser.add_argument('-m', '--models', dest='model_names', nargs='*', type=str)
+    args = parser.parse_args()
+    
+    # If the user specified a number of games to train some models, execute the training process
+    # for each agent type (agent type = number of MCTS iterations used).
+    if args.games_per_model:
+        for iteration in args.iter:
+            UCTTrainModels(args.n_models, args.games_per_model, iteration)
+    
+    # If the user specified a number of games to play...
+    if args.games_play:
+        # If the user generated 'n_models' before, for each agent type, take the last model and
+        # it compete against all the previous models of the same agent type.
+        if args.n_models:
+            for iteration in args.iter:
+                model_name = f'DT_{iteration}_{args.n_models}'
+                competitors = [f'DT_{iteration}_{i}' for i in range(args.n_models)]
+                models_dir = f'models/'
+                out_file = f'results/DT_{iteration}.csv'
+                UCTPlayTournament(args.games_play, model_name, competitors, models_dir, out_file)
+        # If the user specified the names of some models, make them compete between each other (all
+        # combinations of two player matches).
+        elif args.model_names:
+            for match in itertools.combinations(args.model_names, 2):
+                model_name, competitor = match
+                models_dir = f'models/'
+                out_file = f'results/{"-".join(args.model_names)}.csv'
+                UCTPlayTournament(args.games_play, model_name, [competitor], models_dir, out_file)

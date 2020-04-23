@@ -1,0 +1,4 @@
+min_samples_leaf,6
+min_samples_split,20
+accuracy,0.06714246348856436
+time,39.460617780685425
