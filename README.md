@@ -5,8 +5,9 @@ Othello board game.
 
 This repository is structured as follows:
 
+- code/: contains the MCTS algorithm used, the code for collecting data from it and training
+  decision tree models, and the code for evaluating agents by making them play against each other
+  while recording their win rate.
 - data/: a directory containing data collected from different executions of the MCTS algorithm.
-- code/: contains the MCTS algorithm used as well as the code for collecting data from it.
-
-This project is currently being developed. This README will be updated when a fully functional
-version of MCTS using DTs is implemented and tested.
+- models/: contains the decision tree models generated based on the data collected.
+- results/: includes the results of different sets of matches between different agents.
